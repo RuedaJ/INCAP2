@@ -1,0 +1,12 @@
+# Optional placeholder if you prefer local paths instead of UI uploads.
+dem:
+  path: "data/PNOA_MDT05.tif"
+  crs: "EPSG:25830"
+
+awc:
+  path: "data/AWC_eu23.tif"
+  crs: "EPSG:3035"
+
+clc2018:
+  path: "data/CLC2018.tif"
+  crs: "EPSG:3035"

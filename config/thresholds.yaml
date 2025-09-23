@@ -1,1 +1,7 @@
-
+recharge:
+  high:
+    awc_min: 150
+    slope_max: 5
+  medium:
+    awc_min: 50
+    slope_max: 15
