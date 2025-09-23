@@ -1,5 +1,5 @@
 # core/analysis.py
-import pathlib, os
+import os, pathlib
 import numpy as np
 import geopandas as gpd
 from typing import Dict, Optional
@@ -21,34 +21,37 @@ def decode_clc(code):
     c = int(code)
     return (CLC_NAMES.get(c, "Unknown"), c in WATER_BODIES, c in WETLANDS)
 
-def run_analysis(points_gdf: gpd.GeoDataFrame, dem_file: str, awc_file: str, clc_file: str, thresholds: Dict, slope_file: Optional[str]=None):
+def run_analysis(points_gdf: gpd.GeoDataFrame,
+                 dem_file: str,
+                 awc_file: str,
+                 clc_file: str,
+                 thresholds: Dict,
+                 slope_file: Optional[str] = None) -> gpd.GeoDataFrame:
+    # Cap GDAL/threads to avoid OOM
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("GDAL_CACHEMAX", "128")  # MB
+    os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff,.vrt,.gpkg")
+
     gdf = points_gdf.to_crs(4326) if points_gdf.crs else points_gdf.set_crs(4326)
     coords = [(p.x, p.y) for p in gdf.geometry]
 
-    # Limit threads & GDAL cache to avoid OOM in small containers
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("GDAL_CACHEMAX", "128")  # MB
-
-    # 1) Slope & Elevation with a single reader
+    # DEM-based slope & elevation
     try:
         src, reader = open_reader_wgs84(dem_file)
-        if slope_file:
-            slopes = sample_raster_at_points(gdf, slope_file)
-        else:
-            slopes = batch_slope_percent_3x3(reader, coords)
-        elevs = batch_extract_elevation(reader, coords)
+        slopes = sample_raster_at_points(gdf, slope_file) if slope_file else batch_slope_percent_3x3(reader, coords)
+        elevs  = batch_extract_elevation(reader, coords)
         if reader is not src: reader.close()
         src.close()
     except Exception as e:
         raise RuntimeError(f"[stage:dem_slope_elev] {e}") from e
 
-    # 2) AWC
+    # AWC sampling
     try:
         awc_vals = sample_raster_at_points(gdf, awc_file) if awc_file else [None]*len(gdf)
     except Exception as e:
         raise RuntimeError(f"[stage:awc_sample] {e}") from e
 
-    # 3) CLC (raster or vector; vector path is bbox-filtered+simplified)
+    # CLC raster/vector
     try:
         suf = pathlib.Path(clc_file).suffix.lower()
         if suf in [".tif", ".tiff"]:
@@ -58,7 +61,7 @@ def run_analysis(points_gdf: gpd.GeoDataFrame, dem_file: str, awc_file: str, clc
     except Exception as e:
         raise RuntimeError(f"[stage:clc] {e}") from e
 
-    # 4) Assemble
+    # Assemble
     out = gdf.drop(columns=[c for c in ["geometry"] if c in gdf.columns]).copy()
     out["latitude"] = gdf.geometry.y
     out["longitude"] = gdf.geometry.x
