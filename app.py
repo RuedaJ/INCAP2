@@ -121,7 +121,51 @@ elif page.startswith("2"):
                             st.error(f"Analysis failed {e}")
         else:
             st.warning("Upload DEM, AWC, and CLC to proceed.")
+######JR
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("GDAL_CACHEMAX", "128")
+os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff,.vrt,.gpkg")
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+from core.raster_ops import open_reader_wgs84, batch_extract_elevation, batch_slope_percent_3x3, sample_raster_at_points
+from core.clc_vector import assign_clc_code_to_points
+
+if st.button("🔍 Run diagnostics (single-site)"):
+    try:
+        gdf = st.session_state["points_gdf"]
+        assert gdf is not None and len(gdf) >= 1, "No points loaded"
+        p = gdf.geometry.iloc[0]
+        coords = [(p.x, p.y)]
+        st.info("Stage: DEM open & slope/elevation")
+        src, rdr = open_reader_wgs84(dem_path)
+        # slope (prefer slope raster if provided)
+        if slope_path:
+            st.info("Sampling precomputed slope raster")
+            slope_vals = sample_raster_at_points(gdf.iloc[[0]], slope_path)
+        else:
+            st.info("Computing 3×3 slope on DEM")
+            slope_vals = batch_slope_percent_3x3(rdr, coords)
+        elev_vals = batch_extract_elevation(rdr, coords)
+        if rdr is not src: rdr.close()
+        src.close()
+        st.success(f"DEM OK — elev={elev_vals[0]}, slope={slope_vals[0]}")
+
+        st.info("Stage: AWC sample")
+        awc_vals = sample_raster_at_points(gdf.iloc[[0]], awc_path)
+        st.success(f"AWC OK — {awc_vals[0]}")
+
+        st.info("Stage: CLC (raster/vector)")
+        if pathlib.Path(clc_path).suffix.lower() in [".tif", ".tiff"]:
+            clc_vals = sample_raster_at_points(gdf.iloc[[0]], clc_path)
+        else:
+            clc_vals = assign_clc_code_to_points(gdf.iloc[[0]], clc_path)
+        st.success(f"CLC OK — code={clc_vals[0]}")
+    except Exception as e:
+        st.exception(e)
+#######JR
 # Page 3 — Results
 else:
     st.title("Results")
