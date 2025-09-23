@@ -7,6 +7,11 @@ from .raster_ops import open_reader_wgs84, batch_extract_elevation, batch_slope_
 from .land_cover import CLC_NAMES, WATER_BODIES, WETLANDS
 from .clc_vector import assign_clc_code_to_points
 
+# Cap GDAL/threads early to avoid process crashes in small containers
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("GDAL_CACHEMAX", "128")  # MB
+os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff,.vrt,.gpkg")
+
 def classify_recharge(awc_mm, slope_percent, thr):
     hi, med = thr["recharge"]["high"], thr["recharge"]["medium"]
     if (awc_mm is not None and awc_mm > hi["awc_min"]) and (slope_percent is not None and slope_percent < hi["slope_max"]):
@@ -27,15 +32,13 @@ def run_analysis(points_gdf: gpd.GeoDataFrame,
                  clc_file: str,
                  thresholds: Dict,
                  slope_file: Optional[str] = None) -> gpd.GeoDataFrame:
-    # Cap GDAL/threads to avoid OOM
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("GDAL_CACHEMAX", "128")  # MB
-    os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff,.vrt,.gpkg")
-
-    gdf = points_gdf.to_crs(4326) if points_gdf.crs else points_gdf.set_crs(4326)
+    if points_gdf.crs is None:
+        gdf = points_gdf.set_crs(4326)
+    else:
+        gdf = points_gdf.to_crs(4326)
     coords = [(p.x, p.y) for p in gdf.geometry]
 
-    # DEM-based slope & elevation
+    # 1) DEM slope/elevation
     try:
         src, reader = open_reader_wgs84(dem_file)
         slopes = sample_raster_at_points(gdf, slope_file) if slope_file else batch_slope_percent_3x3(reader, coords)
@@ -45,13 +48,13 @@ def run_analysis(points_gdf: gpd.GeoDataFrame,
     except Exception as e:
         raise RuntimeError(f"[stage:dem_slope_elev] {e}") from e
 
-    # AWC sampling
+    # 2) AWC sampling
     try:
         awc_vals = sample_raster_at_points(gdf, awc_file) if awc_file else [None]*len(gdf)
     except Exception as e:
         raise RuntimeError(f"[stage:awc_sample] {e}") from e
 
-    # CLC raster/vector
+    # 3) CLC raster/vector
     try:
         suf = pathlib.Path(clc_file).suffix.lower()
         if suf in [".tif", ".tiff"]:
@@ -61,7 +64,7 @@ def run_analysis(points_gdf: gpd.GeoDataFrame,
     except Exception as e:
         raise RuntimeError(f"[stage:clc] {e}") from e
 
-    # Assemble
+    # 4) Assemble
     out = gdf.drop(columns=[c for c in ["geometry"] if c in gdf.columns]).copy()
     out["latitude"] = gdf.geometry.y
     out["longitude"] = gdf.geometry.x
