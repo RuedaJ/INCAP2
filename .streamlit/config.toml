@@ -1,0 +1,3 @@
+[server]
+# Allow big rasters/GeoPackages (MB)
+maxUploadSize = 2000
