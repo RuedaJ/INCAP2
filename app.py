@@ -8,8 +8,8 @@ from shapely.geometry import Point
 
 # Core helpers from repo
 from core.io_utils import load_points
-from core.raster_ops import sample_raster_at_points, extract_elevation, slope_percent_3x3
 from core.land_cover import CLC_NAMES, WATER_BODIES, WETLANDS
+from core.analysis import run_analysis  # shared, stage-tagged, memory-safe
 
 st.set_page_config(page_title="Water Screening Lite", layout="wide")
 
@@ -29,91 +29,14 @@ def classify_recharge(awc_mm, slope_percent, thresholds):
     return "Low"
 
 def decode_clc(code):
-    name = CLC_NAMES.get(int(code), "Unknown") if code is not None and not (isinstance(code, float) and np.isnan(code)) else "Unknown"
-    near_water = int(code) in WATER_BODIES if code is not None and not (isinstance(code, float) and np.isnan(code)) else False
-    near_wetland = int(code) in WETLANDS if code is not None and not (isinstance(code, float) and np.isnan(code)) else False
-    return name, near_water, near_wetland
-
-# ---- CLC vector support (.gpkg/.geojson/.shp) ----
-CLC_CODE_FIELDS = ["CODE_18","CLC_CODE","CLC_CODE18","code_18","CODE","CLC_CODE_18"]
-
-def load_clc_vector(path: str) -> gpd.GeoDataFrame:
-    clc = gpd.read_file(path)
-    if clc.crs is None:
-        raise ValueError("CLC vector has no CRS defined.")
-    # find code field
-    code_field = next((f for f in CLC_CODE_FIELDS if f in clc.columns), None)
-    if code_field is None:
-        # fallback: first numeric column
-        for c in clc.columns:
-            if clc[c].dtype.kind in ("i","u","f"):
-                code_field = c
-                break
-    if code_field is None:
-        raise ValueError("Could not find CLC code field (e.g., CODE_18/CLC_CODE) in CLC vector.")
-    clc = clc[[code_field, "geometry"]].rename(columns={code_field: "CLC_CODE"})
-    return clc
-
-def assign_clc_code_to_points(points_wgs84: gpd.GeoDataFrame, clc_vector_path: str):
-    clc = load_clc_vector(clc_vector_path)
-    clc = clc.to_crs(points_wgs84.crs)
-    joined = gpd.sjoin(points_wgs84[["geometry"]].copy(), clc, how="left", predicate="intersects")
-    return joined["CLC_CODE"].to_list()
-
-def run_analysis(points_gdf, dem_file, awc_file, clc_file, thresholds, slope_file=None):
-    gdf = points_gdf.copy()
-    if gdf.crs is None:
-        gdf = gdf.set_crs(4326)
-    else:
-        gdf = gdf.to_crs(4326)
-
-    # Slope: prefer precomputed slope raster (percent)
-    if slope_file:
-        slopes = sample_raster_at_points(gdf, slope_file)
-    else:
-        slopes = []
-        for geom in gdf.geometry:
-            try:
-                s = slope_percent_3x3(dem_file, geom.x, geom.y)
-            except Exception:
-                s = None
-            slopes.append(s)
-
-    # Elevation
-    elevs = []
-    for geom in gdf.geometry:
-        try:
-            elevs.append(extract_elevation(dem_file, geom.x, geom.y))
-        except Exception:
-            elevs.append(None)
-
-    # AWC
-    awc_vals = sample_raster_at_points(gdf, awc_file) if awc_file else [None]*len(gdf)
-
-    # CLC (raster or vector)
-    clc_suffix = pathlib.Path(clc_file).suffix.lower()
-    if clc_suffix in [".tif",".tiff"]:
-        clc_vals = sample_raster_at_points(gdf, clc_file) if clc_file else [None]*len(gdf)
-    else:
-        clc_vals = assign_clc_code_to_points(gdf, clc_file)
-
-    # Assemble
-    out = gdf.drop(columns=[c for c in ["geometry"] if c in gdf.columns]).copy()
-    out["latitude"] = gdf.geometry.y
-    out["longitude"] = gdf.geometry.x
-    out["elevation_m"] = elevs
-    out["slope_percent"] = slopes
-    out["awc_mm"] = awc_vals
-    out["land_cover_code"] = clc_vals
-    decoded = [decode_clc(v) for v in clc_vals]
-    out["land_cover_name"] = [d[0] for d in decoded]
-    out["near_water"] = [d[1] for d in decoded]
-    out["near_wetland"] = [d[2] for d in decoded]
-    out["recharge_class"] = [classify_recharge(a, s, thresholds) for a, s in zip(awc_vals, slopes)]
-    return out
+    if code is None or (isinstance(code, float) and np.isnan(code)):
+        return "Unknown", False, False
+    c = int(code)
+    return CLC_NAMES.get(c, "Unknown"), c in WATER_BODIES, c in WETLANDS
 
 def _save_uploaded(tmpdir, uploaded_file, target_basename):
-    if uploaded_file is None: 
+    """Save an UploadedFile to disk, preserving extension; return path or None."""
+    if uploaded_file is None:
         return None
     suffix = pathlib.Path(uploaded_file.name).suffix.lower() or ".bin"
     path = os.path.join(tmpdir, target_basename + suffix)
@@ -188,15 +111,19 @@ elif page.startswith("2"):
 
         if dem_up and awc_up and clc_up:
             if st.button("🚀 Run Screening", type="primary"):
+                import tempfile
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    dem_path = _save_uploaded(tmpdir, dem_up, "dem")
-                    awc_path = _save_uploaded(tmpdir, awc_up, "awc")
-                    clc_path = _save_uploaded(tmpdir, clc_up, "clc")
+                    dem_path   = _save_uploaded(tmpdir, dem_up,  "dem")
+                    awc_path   = _save_uploaded(tmpdir, awc_up,  "awc")
+                    clc_path   = _save_uploaded(tmpdir, clc_up,  "clc")
                     slope_path = _save_uploaded(tmpdir, slope_up, "slope_pct") if slope_up else None
                     with st.spinner("Analyzing points..."):
-                        out = run_analysis(st.session_state["points_gdf"], dem_path, awc_path, clc_path, thresholds, slope_file=slope_path)
-                        st.session_state["results_gdf"] = out
-                        st.success("Done. See Results page.")
+                        try:
+                            out = run_analysis(st.session_state["points_gdf"], dem_path, awc_path, clc_path, thresholds, slope_file=slope_path)
+                            st.session_state["results_gdf"] = out
+                            st.success("Done. See Results page.")
+                        except Exception as e:
+                            st.error(f"Analysis failed {e}")
         else:
             st.warning("Upload DEM, AWC, and CLC to proceed.")
 
